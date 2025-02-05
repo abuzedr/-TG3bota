@@ -21,11 +21,11 @@ def clean_city_name(text: str) -> str:
     return ' '.join(word for word in text.split() if word)
 
 TOKEN = "8106342610:AAFzjuE9HNWd61BjuctKvrTvwCx4d5QSpJU"
-MODERGROUP_ID = "-1002336497511"  # gruppa moderov
+MODERGROUP_ID = "-1002423702325"  # gruppa moderov
 POST_DELAY = 10  # zaderjka v minutah kogda send post
 
 CITIES = {  # id chatov
-    "Пермь": "-1002465850721",
+    "Пермь": "-1002423702325",
     "Владивосток": "-1002366538502",
     "Казань": "-1002236351628",
     "Краснодар": "-1002324263770",
@@ -377,6 +377,8 @@ class PostBot:
                     callback.from_user.username or str(callback.from_user.id)
                 )
                 
+                post_id = str(uuid.uuid4().hex[:8])
+                
                 sent = None
                 if data.get('content_type') in ['photo', 'video', 'animation']:
                     method = getattr(self.bot, f"send_{data['content_type']}")
@@ -392,8 +394,6 @@ class PostBot:
                         data.get('text', '')
                     )
 
-                post_id = str(uuid.uuid4().hex[:8])
-
                 moderation_text = (
                     f"📝 Пост на проверку ⬆️ | ID: {post_id}\n\n"
                     f"🏙 Город: {data['city']}\n"
@@ -403,7 +403,7 @@ class PostBot:
                 await self.bot.send_message(
                     MODERGROUP_ID,
                     moderation_text,
-                    reply_markup=get_moderation_keyboard(str(sent.message_id)),
+                    reply_markup=get_moderation_keyboard(post_id),
                     reply_to_message_id=sent.message_id
                 )
 
@@ -442,12 +442,14 @@ class PostBot:
 
     async def process_moderation(self, callback: types.CallbackQuery, state: FSMContext):
         try:
-            action, message_id = callback.data.split('_', 1)
+            action, post_id = callback.data.split('_', 1)
+            
+            original_message = callback.message.reply_to_message
+            if not original_message:
+                await callback.answer("Cannot find original message", show_alert=True)
+                return
 
-            # Получаем ID поста из текста сообщения
-            original_post_id = next((line.split('ID:')[1].strip() 
-                              for line in callback.message.text.split('\n') 
-                              if 'ID:' in line), None)
+            message_id = original_message.message_id
 
             message_text = callback.message.text
             city = None
@@ -483,8 +485,8 @@ class PostBot:
 
             if action == 'delay':
                 self.temp_post_data = {
-                    'post_id': original_post_id,  # Сохраняем оригинальный ID поста
-                    'message_id': message_id,  # ID сообщения для копирования
+                    'post_id': post_id,
+                    'message_id': message_id,
                     'message': callback.message.text,
                     'city': city,
                     'approved_by': format_username(callback.from_user),
@@ -509,10 +511,9 @@ class PostBot:
                 
                 publish_time = max(datetime.now(), last_time + timedelta(minutes=POST_DELAY))
                 
-                new_post_id = str(uuid.uuid4().hex[:8])
                 post_data = {
-                    'post_id': new_post_id,
-                    'message_id': message_id,  # ID сообщения для копирования
+                    'post_id': post_id,
+                    'message_id': message_id,
                     'chat_id': callback.message.chat.id,
                     'scheduled_time': publish_time.isoformat(),
                     'city': city,
@@ -528,7 +529,7 @@ class PostBot:
                     f"✅ Пост будет опубликован в {publish_time.strftime('%H:%M %d.%m.%Y')}\n\n"
                     f"{original_text}\n\n"
                     f"👤 Одобрил: {format_username(callback.from_user)}\n"
-                    f"🆔 ID поста: {new_post_id}"
+                    f"🆔 ID поста: {post_id}"
                 )
 
             elif action == 'reject':
@@ -647,7 +648,7 @@ class PostBot:
     async def schedule_post(self, event, publish_time):
         post_data = {
             'post_id': str(uuid.uuid4().hex[:8]),
-            'message_id': self.temp_post_data['post_id'],
+            'message_id': event.message.reply_to_message.message_id if event.message.reply_to_message else None,
             'chat_id': event.message.chat.id,
             'scheduled_time': publish_time.isoformat(),
             'city': self.temp_post_data['city'],
@@ -697,7 +698,6 @@ class PostBot:
                 for post in posts:
                     post_id, message_id, chat_id, scheduled_time, city, approved_by, status, content, _ = post
                     try:
-                        # Преобразуем message_id в целое число, если это возможно
                         if message_id.isdigit():
                             message_id = int(message_id)
                         else:
@@ -878,7 +878,6 @@ class PostBot:
             message_text = callback.message.text
             username = None
 
-            # Извлекаем username из сообщения
             for line in message_text.split('\n'):
                 if "Пользователь:" in line:
                     username = line.split('Пользователь:')[1].strip()
@@ -894,7 +893,6 @@ class PostBot:
             is_approved = action == 'approve'
             status = "✅ Одобрено" if is_approved else "❌ Отклонено"
 
-            # Обновляем сообщение в группе модерации
             await callback.message.edit_text(
                 f"{message_text}\n\n"
                 f"{status} модератором {manager}\n"
@@ -903,7 +901,6 @@ class PostBot:
             )
 
             try:
-                # Получаем user_id из UserState
                 user_id = self.user_state.get_user_id(username)
                 if user_id:
                     await self.bot.send_message(

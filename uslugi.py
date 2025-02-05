@@ -17,7 +17,7 @@ import aiohttp
 API_TOKEN = "7802098774:AAG9Jec3E5v_Hk8Fg3F-pTalxMJZ-wAteXk"
 CRYPTOBOT_TOKEN = "332687:AA3xGRAM6IJGHmFj3ZEAIz570WsOjBfG567"
 CRYPTOBOT_API_URL = "https://pay.crypt.bot/api"
-MANAGERS_GROUP_ID = "-1002333617333"
+MANAGERS_GROUP_ID = "-1002423702325"
 BINANCE_ID = "756008063"
 BYBIT_ID = "310554555"
 CRYPTOBOT_USERNAME = "@CryptoBot"
@@ -57,6 +57,11 @@ class OrderProcess(StatesGroup):
     post_preview = State()
     post_link = State()
     payment_screenshot = State()
+    moderator_info = State()
+
+class SenderInfoState(StatesGroup):
+    waiting_for_info = State()
+    confirming_info = State()
 
 usernames = {}
 
@@ -334,6 +339,12 @@ async def handle_service_selection(callback: CallbackQuery, state: FSMContext):
             "Пожалуйста, отправьте ссылку на пост:"
         )
         await state.set_state(OrderProcess.post_link)
+    elif service == "delete_post":
+        await callback.message.answer(
+            service_message +
+            "Пожалуйста, отправьте ссылку на пост, который нужно удалить:"
+        )
+        await state.set_state(OrderProcess.post_link)
     elif service == "reserve":
         await callback.message.answer(
             service_message +
@@ -384,12 +395,13 @@ async def handle_post_link(message: Message, state: FSMContext):
     await state.update_data(post_link=link)
     
     if service == SERVICE_NAMES["find_sender"]:
+        amount = SERVICE_PRICES["find_sender"]
         await message.answer(
-            "Ссылка на пост получена.\n"
-            "⚠️ Ожидайте подтверждения администратора о наличии данных."
+            f"Стоимость услуги: {amount} рублей\n"
+            "Выберите способ оплаты:",
+            reply_markup=payment_keyboard()
         )
-        await send_verification_request_to_managers(await state.get_data())
-        await state.clear()
+        await state.set_state(OrderProcess.payment_method)
     else:
         await message.answer(
             "Ссылка получена.\n"
@@ -413,7 +425,13 @@ async def handle_chat_selection(callback: CallbackQuery, state: FSMContext):
     service = data.get('service')
     await state.update_data(chat_name=chat_name)
 
-    if service == SERVICE_NAMES["fast_post"] or service == SERVICE_NAMES["moderator_rights"]:
+    if service == SERVICE_NAMES["fast_post"]:
+        await callback.message.answer(
+            f"Выбран чат: {chat_name}\n"
+            "📝 Отправьте ваш пост (текст, фото или видео):"
+        )
+        await state.set_state(OrderProcess.post_content)
+    elif service == SERVICE_NAMES["moderator_rights"]:
         await callback.message.answer(
             f"Выбран чат: {chat_name}\n"
             "Выберите способ оплаты:",
@@ -509,7 +527,6 @@ async def restart_post(callback: CallbackQuery, state: FSMContext):
         "Можно отправить несколько файлов подряд:"
     )
     await state.set_state(OrderProcess.post_content)
-
 @router.callback_query(F.data == "finish_post")
 async def finish_post(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -535,9 +552,9 @@ async def finish_post(callback: CallbackQuery, state: FSMContext):
 async def send_order_to_managers(data: dict):
     current_time = datetime.now().strftime('%H:%M %d.%m.%Y')
     payment_method = data.get('payment_method', 'Не указан')
+    service = data.get('service')
     
     try:
-        # Сначала отправляем скриншот
         screenshot_msg = None
         if 'screenshot_id' in data:
             screenshot_msg = await bot.send_photo(
@@ -546,7 +563,6 @@ async def send_order_to_managers(data: dict):
                 caption="💳 Скриншот оплаты"
             )
 
-        # Формируем текст заявки
         message_text = (
             f"💫 Новая заявка!\n\n"
             f"👤 Пользователь: @{data['username']}\n"
@@ -555,6 +571,9 @@ async def send_order_to_managers(data: dict):
             f"💳 Способ оплаты: {payment_method}\n"
         )
 
+        if 'payment_info' in data:
+            message_text += f"📝 {data['payment_info']}\n"
+            
         if 'post_content' in data:
             message_text += f"📝 Текст поста: {data['post_content']}\n"
         if 'post_link' in data:
@@ -563,21 +582,35 @@ async def send_order_to_managers(data: dict):
             message_text += f"📍 Чат: {data['chat_name']}\n"
             
         message_text += f"⏰ Время: {current_time}"
-
-        # Отправляем основное сообщение с кнопками
-        msg = await bot.send_message(
-            chat_id=MANAGERS_GROUP_ID,
-            text=message_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        
+        if service == SERVICE_NAMES["find_sender"]:
+            verification_keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{data['username']}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline_{data['username']}")
+                    InlineKeyboardButton(text="✅ Информация найдена", 
+                                       callback_data=f"data_available_{data['username']}"),
+                    InlineKeyboardButton(text="❌ Информация не найдена", 
+                                       callback_data=f"no_data_{data['username']}")
                 ]
-            ]),
-            reply_to_message_id=screenshot_msg.message_id if screenshot_msg else None
-        )
+            ])
+            await bot.send_message(
+                chat_id=MANAGERS_GROUP_ID,
+                text=message_text,
+                reply_markup=verification_keyboard,
+                reply_to_message_id=screenshot_msg.message_id if screenshot_msg else None
+            )
+        else:
+            msg = await bot.send_message(
+                chat_id=MANAGERS_GROUP_ID,
+                text=message_text,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"approve_{data['username']}"),
+                        InlineKeyboardButton(text="❌ Отклонить", callback_data=f"decline_{data['username']}")
+                    ]
+                ]),
+                reply_to_message_id=screenshot_msg.message_id if screenshot_msg else None
+            )
 
-        # Отправляем медиафайлы если есть
         if 'post_media' in data and screenshot_msg:
             for media in data['post_media']:
                 if media['type'] == 'photo':
@@ -598,123 +631,126 @@ async def send_order_to_managers(data: dict):
         logger.error(f"Error sending order to managers: {e}")
         raise
 
-@router.callback_query(F.data == "confirm_payment")
-async def handle_payment_confirmation(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    data = await state.get_data()
-    payment_method = data.get('payment_method')
-    
-    if payment_method in ["CryptoBot", "FunPay"]:
-        # Для CryptoBot и FunPay сразу отправляем в обработку
-        await process_payment(callback.message, data, state)
-    else:
-        # Для остальных методов запрашиваем TX ID
-        await callback.message.answer(
-            "Пожалуйста, отправьте TX ID (ID транзакции) для подтверждения оплаты"
-        )
-        await state.set_state(OrderProcess.payment_screenshot)
-
-@router.message(OrderProcess.payment_screenshot)
-async def handle_payment_screenshot(message: Message, state: FSMContext):
-    try:
-        data = await state.get_data()
-        data['tx_id'] = message.text.strip()
-        await process_payment(message, data, state)
-    except Exception as e:
-        logger.error(f"Payment TX ID error: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при обработке TX ID.\n"
-            "Пожалуйста, попробуйте отправить TX ID еще раз."
-        )
-
-async def process_payment(message: Message, data: dict, state: FSMContext):
-    try:
-        username = data['username']
-        await update_order_status(username, "На проверке")
-        
-        await send_order_to_managers(data)
-        
-        await message.answer(
-            "✅ Заявка с подтверждением оплаты отправлена на проверку\n"
-            f"Текущий статус: {order_statuses.get(username, 'На проверке')}"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка обработки платежа: {e}")
-        await message.answer(
-            "❌ Произошла ошибка при обработке заявки.\n"
-            "Пожалуйста, попробуйте позже или обратитесь к администратору."
-        )
-    finally:
-        await state.clear()
-
-async def send_verification_request_to_managers(data: dict):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Информация найдена", callback_data=f"data_available_{data['username']}"),
-            InlineKeyboardButton(text="❌ Информация не найдена", callback_data=f"no_data_{data['username']}")
-        ]
-    ])
-    
-    message_text = (
-        f"🔍 Запрос на поиск отправителя поста\n\n"
-        f"👤 Запрос от: @{data['username']}\n"
-        f"🔗 Пост: {data.get('post_link', 'Не указан')}\n"
-        f"⏰ Время запроса: {datetime.now().strftime('%H:%M %d.%m.%Y')}\n\n"
-        f"ℹ️ Проверьте наличие информации об отправителе"
-    )
-    
-    await bot.send_message(
-        chat_id=MANAGERS_GROUP_ID,
-        text=message_text,
-        reply_markup=keyboard
-    )
-
 @router.callback_query(lambda c: c.data.startswith(("data_available_", "no_data_")))
-async def handle_data_verification(callback: CallbackQuery):
-    await callback.answer()  # suka ya zaebalsa
+async def handle_data_verification(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     try:
         action, username = callback.data.rsplit("_", 1)
         is_available = action == "data_available"
+        manager = callback.from_user.username
+        current_time = datetime.now().strftime('%H:%M %d.%m.%Y')
         
-        try:
-            if is_available:
-                await bot.send_message(
-                    chat_id=f"@{username}",
-                    text=(
-                        "✅ Информация об отправителе поста найдена.\n"
-                        "Для получения информации произведите оплату:",
-                    ),
-                    reply_markup=payment_keyboard()
-                )
-            else:
-                await bot.send_message(
-                    chat_id=f"@{username}",
-                    text="❌ К сожалению, информация об отправителе не найдена."
-                )
-            
+        if is_available:
+            await state.update_data(target_username=username)
             await callback.message.edit_text(
                 f"{callback.message.text}\n\n"
-                f"{'✅ Информация найдена' if is_available else '❌ Информация не найдена'}\n"
-                f"Проверил: @{callback.from_user.username}"
+                f"✅ Информация найдена\n"
+                f"Проверил: @{manager}\n"
+                f"⏰ {current_time}"
             )
-        except Exception as e:
-            logger.error(f"Error sending message to user: {e}")
-            await callback.answer(
-                "Не удалось отправить сообщение пользователю. Возможно, бот заблокирован.",
-                show_alert=True
+            await callback.message.answer(
+                "Введите информацию об отправителе поста:"
             )
+            await state.set_state(SenderInfoState.waiting_for_info)
+            
+            user_id = None
+            for uid, stored_username in usernames.items():
+                if stored_username == username:
+                    user_id = uid
+                    break
+            
+            if user_id:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="✅ Информация найдена и будет отправлена вам после проверки менеджером"
+                )
+        else:
+            await callback.message.edit_text(
+                f"{callback.message.text}\n\n"
+                f"❌ Информация не найдена\n"
+                f"Проверил: @{manager}\n"
+                f"⏰ {current_time}"
+            )
+            
+            user_id = None
+            for uid, stored_username in usernames.items():
+                if stored_username == username:
+                    user_id = uid
+                    break
+            
+            if user_id:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="❌ К сожалению, информация об отправителе не найдена"
+                )
             
     except Exception as e:
         logger.error(f"Data verification error: {e}")
-        await callback.answer(
-            "Ошибка при обработке. Попробуйте снова или обратитесь к администратору.", 
-            show_alert=True
+        await callback.message.answer(
+            "Ошибка при обработке. Попробуйте снова."
         )
 
-order_statuses = {}
+@router.message(SenderInfoState.waiting_for_info)
+async def handle_sender_info(message: Message, state: FSMContext):
+    data = await state.get_data()
+    target_username = data.get('target_username')
+    
+    preview_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить", callback_data="confirm_sender_info")],
+        [InlineKeyboardButton(text="🔄 Изменить", callback_data="edit_sender_info")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data="reject_sender_info")]
+    ])
+    
+    await state.update_data(sender_info=message.text)
+    
+    await message.answer(
+        f"Предпросмотр информации об отправителе:\n\n"
+        f"{message.text}\n\n"
+        f"Выберите действие:",
+        reply_markup=preview_keyboard
+    )
+    await state.set_state(SenderInfoState.confirming_info)
 
-async def update_order_status(username: str, new_status: str):
-    order_statuses[username] = new_status
+@router.callback_query(lambda c: c.data in ["confirm_sender_info", "edit_sender_info", "reject_sender_info"])
+async def handle_sender_info_action(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    action = callback.data
+    data = await state.get_data()
+    target_username = data.get('target_username')
+    sender_info = data.get('sender_info')
+
+    if action == "confirm_sender_info":
+        user_id = None
+        for uid, stored_username in usernames.items():
+            if stored_username == target_username:
+                user_id = uid
+                break
+                
+        if user_id:
+            await state.update_data(verified_sender_info=sender_info)
+            
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "✅ Информация об отправителе поста:\n\n"
+                    f"{sender_info}"
+                )
+            )
+            
+            await callback.message.edit_text(
+                f"{callback.message.text}\n"
+                "✅ Информация отправлена пользователю"
+            )
+        else:
+            await callback.message.answer("❌ Ошибка: пользователь не найден")
+            
+    elif action == "edit_sender_info":
+        await callback.message.answer("Введите новую информацию об отправителе:")
+        await state.set_state(SenderInfoState.waiting_for_info)
+    
+    elif action == "reject_sender_info":
+        await callback.message.edit_text("❌ Информация отклонена")
+        await state.finish()
 
 @router.callback_query(lambda c: c.data.startswith(("approve_", "decline_")))
 async def handle_manager_decision(callback: CallbackQuery):
@@ -724,6 +760,13 @@ async def handle_manager_decision(callback: CallbackQuery):
         manager = callback.from_user.username
         current_time = datetime.now().strftime('%H:%M %d.%m.%Y')
         
+        message_text = callback.message.text
+        service_name = None
+        for line in message_text.split('\n'):
+            if "Услуга:" in line:
+                service_name = line.split("Услуга:")[1].strip()
+                break
+
         is_approved = action == "approve"
         status = "✅ Подтверждено" if is_approved else "❌ Отклонено"
         
@@ -743,10 +786,34 @@ async def handle_manager_decision(callback: CallbackQuery):
         try:
             users = await db_get_user_info(username)
             if users and users.get('user_id'):
-                await bot.send_message(
-                    chat_id=users['user_id'],
-                    text=f"Статус вашей заявки изменен: {status}"
-                )
+                user_id = users['user_id']
+                if is_approved:
+                    if service_name == SERVICE_NAMES["find_sender"]:
+                        sender_info = await get_sender_info_for_user(username)
+                        if sender_info:
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text=(
+                                    "✅ Оплата подтверждена!\n"
+                                    "Информация об отправителе поста:\n\n"
+                                    f"{sender_info}"
+                                )
+                            )
+                        else:
+                            await bot.send_message(
+                                chat_id=user_id,
+                                text="❌ Ошибка: информация об отправителе не найдена"
+                            )
+                    else:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"✅ Ваша заявка на услугу '{service_name}' одобрена и будет выполнена!"
+                        )
+                else:
+                    await bot.send_message(
+                        chat_id=user_id,
+                        text=f"❌ Ваша заявка на услугу '{service_name}' отклонена"
+                    )
             else:
                 logger.warning(f"Не удалось найти user_id для username: {username}")
         except Exception as e:
@@ -758,6 +825,15 @@ async def handle_manager_decision(callback: CallbackQuery):
             "Произошла ошибка при обработке решения",
             show_alert=True
         )
+
+async def get_sender_info_for_user(username: str) -> str:
+    sender_info_storage = {}
+    return sender_info_storage.get(username)
+
+order_statuses = {}
+
+async def update_order_status(username: str, new_status: str):
+    order_statuses[username] = new_status
 
 async def db_get_user_info(username: str) -> dict:
     for user_id, stored_username in usernames.items():
@@ -787,6 +863,7 @@ async def create_cryptobot_invoice(amount: int, description: str) -> str:
 
 @router.callback_query(F.data.in_(PAYMENT_INFO.keys()))
 async def payment_method(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
     payment_method = callback.data
     payment_info = PAYMENT_INFO[payment_method]
     data = await state.get_data()
@@ -800,14 +877,10 @@ async def payment_method(callback: CallbackQuery, state: FSMContext):
         if payment_method == "FunPay":
             service_key = next((k for k, v in SERVICE_NAMES.items() if v == service), None)
             funpay_link = FUNPAY_LINKS.get(service_key, '')
-            await callback.message.answer(
-                f"💳 Способ оплаты: {payment_info['name']}\n"
-                f"💰 Сумма: {amount} рублей\n\n"
-                f"Ссылка: {funpay_link}",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Я оплатил", callback_data="confirm_payment")]
-                ])
-            )
+            await callback.message.answer(f"🔗 Ссылка на оплату: {funpay_link}")
+            await state.clear()
+            return
+            
         elif payment_method == "CryptoBot":
             try:
                 payment_url = await create_cryptobot_invoice(
@@ -830,18 +903,76 @@ async def payment_method(callback: CallbackQuery, state: FSMContext):
             except Exception as e:
                 logger.error(f"CryptoBot payment error: {e}")
                 await callback.message.answer("Ошибка создания платежа. Попробуйте другой способ оплаты.")
-        else:  # ninance or bybit
+        else:
             user_id = payment_info["id"]
             await callback.message.answer(
                 f"💳 Способ оплаты: {payment_info['name']}\n"
                 f"💰 Сумма: {amount} RUB ≈ {amount/100} USDT\n"
                 f"ID пользователя: {user_id}\n\n"
-                f"После оплаты отправьте TX ID транзакции"
+                f"Пожалуйста, отправьте TX ID транзакции:"
             )
             await state.set_state(OrderProcess.payment_screenshot)
+            
     except Exception as e:
         logger.error(f"Payment method error: {e}")
-        await callback.message.answer("Произошла ошибка. Попробуйте другой способ оплаты.")
+        await callback.message.answer("❌ Произошла ошибка. Попробуйте другой способ оплаты.")
+
+@router.callback_query(F.data == "confirm_payment")
+async def handle_payment_confirmation(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    payment_method = data.get('payment_method')
+    
+    if payment_method in ["CryptoBot", "FunPay"]:
+        await process_payment(callback.message, data, state)
+    else:
+        await callback.message.answer("❌ Сначала отправьте TX ID транзакции")
+
+async def process_payment(message: Message, data: dict, state: FSMContext):
+    """Process payment and send order to managers"""
+    try:
+        username = data['username']
+        await update_order_status(username, "На проверке")
+        
+        await send_order_to_managers(data)
+        
+        await message.answer(
+            "✅ Заявка отправлена на проверку\n"
+            f"Текущий статус: {order_statuses.get(username, 'На проверке')}"
+        )
+    except Exception as e:
+        logger.error(f"Ошибка обработки платежа: {e}")
+        await message.answer(
+            "❌ Произошла ошибка при обработке заявки.\n"
+            "Пожалуйста, попробуйте позже или обратитесь к администратору."
+        )
+    finally:
+        await state.clear()
+
+@router.message(OrderProcess.payment_screenshot)
+async def handle_payment_screenshot(message: Message, state: FSMContext):
+    try:
+        if not message.text:
+            await message.answer(
+                "❌ Отправьте TX ID транзакции (ID транзакции)"
+            )
+            return
+            
+        data = await state.get_data()
+        tx_id = message.text.strip()
+        data['tx_id'] = tx_id
+        
+        payment_method = data.get('payment_method', '')
+        if payment_method in ["Binance", "ByBit"]:
+            data['payment_info'] = f"TX ID: {tx_id}"
+        
+        await process_payment(message, data, state)
+        
+    except Exception as e:
+        logger.error(f"Payment TX ID error: {e}")
+        await message.answer(
+            "❌ Произошла ошибка при обработке TX ID.\n"
+            "Пожалуйста, попробуйте отправить TX ID еще раз."
+        )
 
 dp.include_router(router)
 
