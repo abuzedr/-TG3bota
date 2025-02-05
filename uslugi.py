@@ -756,7 +756,9 @@ async def handle_sender_info_action(callback: CallbackQuery, state: FSMContext):
 async def handle_manager_decision(callback: CallbackQuery):
     await callback.answer()
     try:
-        action, username = callback.data.split("_")
+        action = "approve" if callback.data.startswith("approve_") else "decline"
+        username = callback.data.replace("approve_", "").replace("decline_", "")
+        
         manager = callback.from_user.username
         current_time = datetime.now().strftime('%H:%M %d.%m.%Y')
         
